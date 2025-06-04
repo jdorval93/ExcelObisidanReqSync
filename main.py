@@ -63,12 +63,14 @@ class RequirementsConverter:
         info_frame = ttk.LabelFrame(main_frame, text="Column Mapping", padding="10")
         info_frame.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
         
-        mapping_text = """Column A: Requirement ID (part of filename)
+        mapping_text = """Column A: Requirement ID (REQUIRED for filename)
 Column B: Category/Functional Activity  
 Column C: Topic
-Column E: Short Description (part of filename)
+Column E: Short Description (REQUIRED for filename)
 Column F: Description Overview
-Column G: Priority"""
+Column G: Priority
+
+Note: Both Column A and E are required to create files."""
         
         ttk.Label(info_frame, text=mapping_text, font=('Arial', 9), foreground="gray").grid(row=0, column=0, sticky=tk.W)
         
@@ -152,26 +154,19 @@ Column G: Priority"""
         return text[:100]  # Limit length
         
     def generate_filename(self, row):
-        """Generate filename from Excel row data"""
-        req_id = str(row['A']).strip() if pd.notna(row['A']) else ""
-        short_desc = str(row['E']).strip() if pd.notna(row['E']) else ""
+        """Generate filename from Excel row data - requires both ID and short description"""
+        req_id = str(row['A']).strip() if pd.notna(row['A']) and str(row['A']).strip() else ""
+        short_desc = str(row['E']).strip() if pd.notna(row['E']) and str(row['E']).strip() else ""
+        
+        # Only create filename if both ID and short description are available
+        if not req_id:
+            raise ValueError("Missing Requirement ID (Column A)")
+        
+        if not short_desc:
+            raise ValueError("Missing Short Description (Column E)")
         
         # Combine ID and short description for filename
-        if req_id and short_desc:
-            filename_base = f"{req_id}_{short_desc}"
-        elif req_id:
-            filename_base = req_id
-        elif short_desc:
-            filename_base = short_desc
-        else:
-            # Fallback if no ID or short description
-            if pd.notna(row['C']):  # Topic
-                filename_base = str(row['C'])
-            elif pd.notna(row['B']):  # Category/Functional Activity
-                filename_base = str(row['B'])[:50]  # First 50 chars
-            else:
-                filename_base = "unknown_requirement"
-                
+        filename_base = f"{req_id}_{short_desc}"
         filename_base = self.sanitize_filename(filename_base)
         return f"{filename_base}.md"
         
@@ -275,20 +270,29 @@ Column G: Priority"""
             # Check which files exist
             missing_files = []
             existing_files = []
+            invalid_requirements = []
             
             for idx, row in requirements:
-                filename = self.generate_filename(row)
-                filepath = os.path.join(self.output_dir.get(), filename)
-                
-                req_id = str(row['A']).strip() if pd.notna(row['A']) else "No ID"
-                short_desc = str(row['E']).strip() if pd.notna(row['E']) else "No description"
-                
-                if os.path.exists(filepath):
-                    existing_files.append((filename, req_id, short_desc))
-                    self.log(f"✓ EXISTS: {filename}")
-                else:
-                    missing_files.append((filename, req_id, short_desc, idx, row))
-                    self.log(f"❌ MISSING: {filename} ({req_id} - {short_desc})")
+                try:
+                    filename = self.generate_filename(row)
+                    filepath = os.path.join(self.output_dir.get(), filename)
+                    
+                    req_id = str(row['A']).strip() if pd.notna(row['A']) else "No ID"
+                    short_desc = str(row['E']).strip() if pd.notna(row['E']) else "No description"
+                    
+                    if os.path.exists(filepath):
+                        existing_files.append((filename, req_id, short_desc))
+                        self.log(f"✓ EXISTS: {filename}")
+                    else:
+                        missing_files.append((filename, req_id, short_desc, idx, row))
+                        self.log(f"❌ MISSING: {filename} ({req_id} - {short_desc})")
+                        
+                except ValueError as e:
+                    invalid_requirements.append((idx, row, str(e)))
+                    row_num = idx + 6  # Adjust for Excel row numbering
+                    req_id = str(row['A']).strip() if pd.notna(row['A']) and str(row['A']).strip() else "Missing"
+                    short_desc = str(row['E']).strip() if pd.notna(row['E']) and str(row['E']).strip() else "Missing"
+                    self.log(f"⚠ INVALID (Row {row_num}): {str(e)} - ID: '{req_id}', Short Desc: '{short_desc}'")
             
             # Summary
             self.log("=" * 60)
@@ -296,6 +300,7 @@ Column G: Priority"""
             self.log(f"📊 Total requirements: {len(requirements)}")
             self.log(f"✓ Existing files: {len(existing_files)}")
             self.log(f"❌ Missing files: {len(missing_files)}")
+            self.log(f"⚠ Invalid requirements: {len(invalid_requirements)}")
             
             if missing_files:
                 self.log("=" * 60)
@@ -303,10 +308,20 @@ Column G: Priority"""
                 for filename, req_id, short_desc, idx, row in missing_files:
                     self.log(f"  • {req_id}: {short_desc}")
                 self.log(f"\nUse 'Create Missing Files' to create these {len(missing_files)} files")
-            else:
-                self.log("🎉 All requirements have corresponding files!")
             
-            self.status_text.set(f"Check complete: {len(missing_files)} missing files")
+            if invalid_requirements:
+                self.log("=" * 60)
+                self.log("INVALID REQUIREMENTS (cannot create files):")
+                for idx, row, error in invalid_requirements:
+                    row_num = idx + 6
+                    req_id = str(row['A']).strip() if pd.notna(row['A']) and str(row['A']).strip() else "Missing"
+                    short_desc = str(row['E']).strip() if pd.notna(row['E']) and str(row['E']).strip() else "Missing"
+                    self.log(f"  • Row {row_num}: {error} (ID: '{req_id}', Short Desc: '{short_desc}')")
+            
+            if not missing_files and not invalid_requirements:
+                self.log("🎉 All valid requirements have corresponding files!")
+            
+            self.status_text.set(f"Check complete: {len(missing_files)} missing, {len(invalid_requirements)} invalid")
             
         except Exception as e:
             error_msg = f"Error checking files: {str(e)}"
@@ -337,52 +352,81 @@ Column G: Priority"""
             # Create missing files
             created_count = 0
             skipped_count = 0
+            error_count = 0
             
             # Ensure output directory exists
             os.makedirs(self.output_dir.get(), exist_ok=True)
             
             for idx, row in requirements:
-                filename = self.generate_filename(row)
-                filepath = os.path.join(self.output_dir.get(), filename)
-                
-                req_id = str(row['A']).strip() if pd.notna(row['A']) else "No ID"
-                short_desc = str(row['E']).strip() if pd.notna(row['E']) else "No description"
-                
-                if os.path.exists(filepath):
-                    skipped_count += 1
-                    self.log(f"⏭ SKIPPED: {filename} (already exists)")
-                else:
-                    # Create the file
-                    content = self.create_md_content(row)
+                try:
+                    filename = self.generate_filename(row)
+                    filepath = os.path.join(self.output_dir.get(), filename)
                     
-                    with open(filepath, 'w', encoding='utf-8') as f:
-                        f.write(content)
+                    req_id = str(row['A']).strip() if pd.notna(row['A']) else "No ID"
+                    short_desc = str(row['E']).strip() if pd.notna(row['E']) else "No description"
                     
-                    created_count += 1
-                    self.log(f"✅ CREATED: {filename} ({req_id} - {short_desc})")
+                    if os.path.exists(filepath):
+                        skipped_count += 1
+                        self.log(f"⏭ SKIPPED: {filename} (already exists)")
+                    else:
+                        # Create the file
+                        content = self.create_md_content(row)
+                        
+                        with open(filepath, 'w', encoding='utf-8') as f:
+                            f.write(content)
+                        
+                        created_count += 1
+                        self.log(f"✅ CREATED: {filename} ({req_id} - {short_desc})")
+                        
+                except ValueError as e:
+                    error_count += 1
+                    row_num = idx + 6  # Adjust for Excel row numbering (data starts at row 6)
+                    req_id = str(row['A']).strip() if pd.notna(row['A']) and str(row['A']).strip() else "Missing"
+                    short_desc = str(row['E']).strip() if pd.notna(row['E']) and str(row['E']).strip() else "Missing"
+                    self.log(f"❌ ERROR (Row {row_num}): {str(e)} - ID: '{req_id}', Short Desc: '{short_desc}'")
+                except Exception as e:
+                    error_count += 1
+                    row_num = idx + 6
+                    self.log(f"❌ UNEXPECTED ERROR (Row {row_num}): {str(e)}")
             
             # Summary
             self.log("=" * 60)
             self.log("CREATION COMPLETE")
             self.log(f"✅ Files created: {created_count}")
             self.log(f"⏭ Files skipped: {skipped_count}")
+            self.log(f"❌ Errors (files not created): {error_count}")
             self.log(f"📊 Total processed: {len(requirements)}")
+            
+            if error_count > 0:
+                self.log(f"\n⚠ {error_count} requirements could not be processed due to missing ID or Short Description")
             
             self.status_text.set("File creation complete!")
             
-            # Generate overview if enabled
+            # Generate overview if enabled and files were created
             if AUTO_GENERATE_OVERVIEW and created_count > 0:
                 self.log("Auto-generating requirements overview...")
                 self.generate_overview_only()
             
             # Show summary dialog
-            summary_msg = (f"File Creation Complete!\n\n"
-                          f"Created: {created_count} new files\n"
-                          f"Skipped: {skipped_count} existing files\n"
-                          f"Total: {len(requirements)} requirements processed\n\n"
-                          f"All files are now in your Obsidian vault!")
+            if error_count > 0:
+                summary_msg = (f"File Creation Complete with Errors!\n\n"
+                              f"Created: {created_count} new files\n"
+                              f"Skipped: {skipped_count} existing files\n"
+                              f"Errors: {error_count} requirements missing required data\n"
+                              f"Total: {len(requirements)} requirements processed\n\n"
+                              f"Check the log for details on failed requirements.\n"
+                              f"Requirements need both ID (Column A) and Short Description (Column E).")
+            else:
+                summary_msg = (f"File Creation Complete!\n\n"
+                              f"Created: {created_count} new files\n"
+                              f"Skipped: {skipped_count} existing files\n"
+                              f"Total: {len(requirements)} requirements processed\n\n"
+                              f"All files are now in your Obsidian vault!")
                 
-            messagebox.showinfo("Creation Complete", summary_msg)
+            if error_count > 0:
+                messagebox.showwarning("Creation Complete with Errors", summary_msg)
+            else:
+                messagebox.showinfo("Creation Complete", summary_msg)
             
         except Exception as e:
             error_msg = f"Error creating files: {str(e)}"
